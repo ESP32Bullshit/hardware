@@ -18,7 +18,7 @@ uECC_Curve uECC_secp256k1(void);
 #define ECC_SIGNATURE_SIZE 64
 #define ECC_SHARED_SECRET_SIZE 32
 
-
+void ecc_init(void);
 
 bool ecc_generate_keypair(uint8_t pub[ECC_PUBLIC_KEY_SIZE], uint8_t priv[ECC_PRIVATE_KEY_SIZE]);
 
