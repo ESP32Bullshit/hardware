@@ -30,5 +30,6 @@ bool ecc_verify(const uint8_t pub[ECC_PUBLIC_KEY_SIZE], const uint8_t *msg, unsi
 }
 
 bool ecc_shared_secret(const uint8_t priv[ECC_PRIVATE_KEY_SIZE], const uint8_t pub[ECC_PUBLIC_KEY_SIZE], uint8_t secret[ECC_SHARED_SECRET_SIZE]) {
-    return uECC_shared_secret(priv, pub, secret, ECC_CURVE);
+    // uECC_shared_secret expects: public_key, private_key, secret, curve
+    return uECC_shared_secret(pub, priv, secret, ECC_CURVE);
 }

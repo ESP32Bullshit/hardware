@@ -24,11 +24,46 @@ bool crypto_ecies_encrypt(const uint8_t receiver_pub[ECC_PUBLIC_KEY_SIZE],
     // Generate ephemeral key
     if (!ecc_generate_keypair(ephemeral_pub, ephemeral_priv)) return false;
 
+    // Debug: print ephemeral keys
+    printf("Ephemeral private key: ");
+    for (int i = 0; i < ECC_PRIVATE_KEY_SIZE; i++) {
+        printf("%02X", ephemeral_priv[i]);
+    }
+    printf("\n");
+    
+    printf("Ephemeral public key: ");
+    for (int i = 0; i < ECC_PUBLIC_KEY_SIZE; i++) {
+        printf("%02X", ephemeral_pub[i]);
+    }
+    printf("\n");
+    
+    // Debug: print receiver public key
+    printf("Receiver public key: ");
+    for (int i = 0; i < ECC_PUBLIC_KEY_SIZE; i++) {
+        printf("%02X", receiver_pub[i]);
+    }
+    printf("\n");
+
     // Compute shared secret
+    printf("Computing shared secret for encryption...\n");
     if (!ecc_shared_secret(ephemeral_priv, receiver_pub, shared_secret)) return false;
+    
+    // Debug: print shared secret
+    printf("Shared secret: ");
+    for (int i = 0; i < ECC_SHARED_SECRET_SIZE; i++) {
+        printf("%02X", shared_secret[i]);
+    }
+    printf("\n");
 
     // Derive AES key
     derive_aes_key(shared_secret, aes_key);
+    
+    // Debug: print AES key
+    printf("AES key: ");
+    for (int i = 0; i < AES_KEY_SIZE; i++) {
+        printf("%02X", aes_key[i]);
+    }
+    printf("\n");
 
     // AES encrypt
     mbedtls_aes_context aes;
