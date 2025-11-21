@@ -85,17 +85,9 @@ void wifi_init_apsta(void)
         },
     };
 
-    wifi_config_t sta_config = {
-        .sta = {
-            .ssid = "JIOFIBER",
-            .password = "12341234"
-        },
-    };
-
-    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    esp_wifi_set_mode(WIFI_MODE_AP);
     esp_wifi_set_config(WIFI_IF_AP, &ap_config);
-    esp_wifi_set_config(WIFI_IF_STA, &sta_config);
     esp_wifi_start();
 
-    ESP_LOGI(TAG, "WiFi AP+STA started: AP=KISUKE, Connecting to STA=%s...", sta_config.sta.ssid);
+    ESP_LOGI(TAG, "WiFi AP started: AP=KISUKE");
 }

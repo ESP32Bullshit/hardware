@@ -233,14 +233,24 @@ esp_err_t test_page_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ...existing code...
+
 esp_err_t status_get_handler(httpd_req_t *req) {
     add_cors_headers(req);
-    char resp[128];
-    snprintf(resp, sizeof(resp), "Device is running. Free heap: %ld bytes", esp_get_free_heap_size());
+    
+    // 🔥 Fixed: Proper JSON format
+    char resp[256];
+    snprintf(resp, sizeof(resp), 
+             "{\"status\":\"ok\",\"free_heap\":%lu,\"timestamp\":%llu}",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long long)(esp_timer_get_time() / 1000));
+    
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
+
+// ...existing code...
 
 /* ---------- /api/public_key ---------- */
 esp_err_t public_key_get_handler(httpd_req_t *req)
