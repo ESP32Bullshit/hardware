@@ -77,8 +77,8 @@ void wifi_init_apsta(void)
 
     wifi_config_t ap_config = {
         .ap = {
-            .ssid = "KISUKE",
-            .ssid_len = strlen("KISUKE"),
+            .ssid = "KISUKE1",
+            .ssid_len = strlen("KISUKE1"),
             .password = "12345678",
             .max_connection = 2,
             .authmode = WIFI_AUTH_WPA_WPA2_PSK

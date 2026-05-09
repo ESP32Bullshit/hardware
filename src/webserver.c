@@ -233,8 +233,7 @@ esp_err_t test_page_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ...existing code...
-
+/* ---------- /api/status ---------- */
 esp_err_t status_get_handler(httpd_req_t *req) {
     add_cors_headers(req);
     
@@ -249,8 +248,6 @@ esp_err_t status_get_handler(httpd_req_t *req) {
     httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
-
-// ...existing code...
 
 /* ---------- /api/public_key ---------- */
 esp_err_t public_key_get_handler(httpd_req_t *req)
@@ -306,6 +303,44 @@ esp_err_t store_peer_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---------- /api/set_uid ---------- */
+esp_err_t set_uid_post_handler(httpd_req_t *req)
+{
+    add_cors_headers(req);
+    char *body = NULL; size_t blen = 0;
+    if (http_read_body(req, &body, &blen) != 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_sendstr(req, "{\"error\":\"unable to read body\"}"); 
+        return ESP_OK;
+    }
+    cJSON *root = cJSON_Parse(body);
+    free(body);
+    if (!root) { 
+        httpd_resp_set_status(req, "400 Bad Request"); 
+        httpd_resp_sendstr(req, "{\"error\":\"invalid json\"}"); 
+        return ESP_OK; 
+    }
+    const cJSON *j_uid = cJSON_GetObjectItem(root, "uid");
+    if (!cJSON_IsString(j_uid) || strlen(j_uid->valuestring) != 12) {
+        cJSON_Delete(root); 
+        httpd_resp_set_status(req, "400 Bad Request"); 
+        httpd_resp_sendstr(req, "{\"error\":\"missing or invalid uid (must be exactly 12 chars)\"}"); 
+        return ESP_OK;
+    }
+    
+    if (!store_device_uid(j_uid->valuestring)) {
+        cJSON_Delete(root); 
+        httpd_resp_set_status(req, "500 Internal Server Error"); 
+        httpd_resp_sendstr(req, "{\"error\":\"failed to store uid\"}");
+        return ESP_OK;
+    }
+    
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+    return ESP_OK;
+}
+
 /* ---------- /api/send_location (GET - returns error) ---------- */
 esp_err_t send_location_get_handler(httpd_req_t *req)
 {
@@ -334,13 +369,16 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
     char *payload_str = NULL;
     cJSON *resp = NULL;
     char *resp_str = NULL;
+    esp_err_t ret = ESP_OK;
     
     // Read request body
     if (http_read_body(req, &body, &blen) != 0) {
+        ESP_LOGE(TAG, "Failed to read request body");
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "{\"error\":\"unable to read body\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
+    ESP_LOGI(TAG, "Request body: %s", body);
     
     // Parse JSON
     root = cJSON_Parse(body);
@@ -348,9 +386,10 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
     body = NULL;
     
     if (!root) {
+        ESP_LOGE(TAG, "Failed to parse JSON");
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "{\"error\":\"invalid json\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     // Extract JSON fields
@@ -361,43 +400,48 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
     
     if (!cJSON_IsString(j_user) || !cJSON_IsString(j_receiver) || 
         !cJSON_IsNumber(j_lat) || !cJSON_IsNumber(j_lon)) {
+        ESP_LOGE(TAG, "Missing or invalid JSON fields");
         cJSON_Delete(root);
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_sendstr(req, "{\"error\":\"missing fields\"}");
-        return ESP_FAIL;
+        httpd_resp_sendstr(req, "{\"error\":\"missing or invalid fields\"}");
+        return ESP_OK;
     }
     
     const char *user_id = j_user->valuestring;
     const char *receiver_id = j_receiver->valuestring;
     double lat = j_lat->valuedouble;
     double lon = j_lon->valuedouble;
+    ESP_LOGI(TAG, "Parsed data: user_id=%s, receiver_id=%s, lat=%f, lon=%f", user_id, receiver_id, lat, lon);
     
     // Load device keys
     uint8_t device_pub[ECC_PUBLIC_KEY_SIZE];
     uint8_t device_priv[ECC_PRIVATE_KEY_SIZE];
     if (!load_keys_from_nvs(device_pub, sizeof(device_pub), device_priv, sizeof(device_priv))) {
+        ESP_LOGE(TAG, "Failed to load device keys from NVS");
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"device keys not available\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     // Load receiver public key
     uint8_t recv_pub[ECC_PUBLIC_KEY_SIZE];
     if (!load_peer_publickey(user_id, receiver_id, recv_pub, sizeof(recv_pub))) {
+        ESP_LOGE(TAG, "Failed to load peer public key for user '%s', receiver '%s'", user_id, receiver_id);
         cJSON_Delete(root);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_sendstr(req, "{\"error\":\"receiver public key not found\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     // Create payload JSON
     payload = cJSON_CreateObject();
     if (!payload) {
+        ESP_LOGE(TAG, "Failed to create payload JSON object");
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"memory allocation failed\"}");
-        return ESP_FAIL;
+        httpd_resp_sendstr(req, "{\"error\":\"memory allocation failed for payload\"}");
+        return ESP_OK;
     }
     
     cJSON_AddStringToObject(payload, "user_id", user_id);
@@ -407,14 +451,16 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
     
     payload_str = cJSON_PrintUnformatted(payload);
     if (!payload_str) {
+        ESP_LOGE(TAG, "Failed to serialize payload JSON");
         cJSON_Delete(payload);
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"payload serialization failed\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     size_t payload_len = strlen(payload_str);
+    ESP_LOGI(TAG, "Payload to sign & encrypt: %s", payload_str);
     
     // Sign the payload
     uint8_t signature[ECC_SIGNATURE_SIZE];
@@ -425,7 +471,7 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"signing failed\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     // Encrypt the payload
@@ -441,21 +487,22 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "{\"error\":\"encryption failed\"}");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     
     // Convert to hex (allocate sufficient buffer size)
     char hex_ephemeral[ECC_PUBLIC_KEY_SIZE * 2 + 1];
-    char *hex_cipher = malloc(ct_len * 2 + 1);  // Dynamic allocation based on actual size
+    char *hex_cipher = malloc(ct_len * 2 + 1);
     char hex_sig[ECC_SIGNATURE_SIZE * 2 + 1];
     
     if (!hex_cipher) {
+        ESP_LOGE(TAG, "Failed to allocate memory for hex_cipher");
         free(payload_str);
         cJSON_Delete(payload);
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"memory allocation failed\"}");
-        return ESP_FAIL;
+        httpd_resp_sendstr(req, "{\"error\":\"memory allocation failed for hex conversion\"}");
+        return ESP_OK;
     }
     
     bytes_to_hex(ephemeral_pub, sizeof(ephemeral_pub), hex_ephemeral, sizeof(hex_ephemeral));
@@ -463,18 +510,31 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
     bytes_to_hex(signature, sizeof(signature), hex_sig, sizeof(hex_sig));
     
     ESP_LOGI(TAG, "Ephemeral Pub: %s", hex_ephemeral);
-    ESP_LOGI(TAG, "Ciphertext (%d): %.100s...", (int)ct_len, hex_cipher);  // Truncate log output
+    ESP_LOGI(TAG, "Ciphertext (%d): %.100s...", (int)ct_len, hex_cipher);
     ESP_LOGI(TAG, "Signature: %s", hex_sig);
+    
+    // Load this device's UID (12 chars + null)
+    char device_uid[13] = {0};
+    if (!load_device_uid(device_uid, sizeof(device_uid))) {
+        strcpy(device_uid, "000000000000"); // Fallback if no UID set
+    }
+    ESP_LOGI(TAG, "Device UID: %s", device_uid);
     
     // Send encrypted data via LoRa
     ESP_LOGI(TAG, "Sending encrypted location data via LoRa...");
     
-    // Create LoRa packet: ephemeral_pub + ciphertext + signature
-    size_t lora_packet_len = sizeof(ephemeral_pub) + ct_len + sizeof(signature);
+    // Packet Structure: hop_count(1) + uid(12) + ephemeral_pub(64) + ciphertext(N) + signature(64)
+    size_t lora_packet_len = 1 + 12 + sizeof(ephemeral_pub) + ct_len + sizeof(signature);
     uint8_t *lora_packet = malloc(lora_packet_len);
     
     if (lora_packet) {
         size_t offset = 0;
+        lora_packet[offset++] = 0; // Initial hop count
+        
+        // Copy 12-byte UID
+        memcpy(lora_packet + offset, device_uid, 12);
+        offset += 12;
+        
         memcpy(lora_packet + offset, ephemeral_pub, sizeof(ephemeral_pub));
         offset += sizeof(ephemeral_pub);
         memcpy(lora_packet + offset, ciphertext, ct_len);
@@ -487,50 +547,44 @@ esp_err_t send_location_post_handler(httpd_req_t *req)
         ESP_LOGI(TAG, "✓ Location data sent via LoRa");
     } else {
         ESP_LOGE(TAG, "Failed to allocate memory for LoRa packet");
+        // Non-fatal, we can still send HTTP response
     }
     
     // Create response JSON
     resp = cJSON_CreateObject();
     if (!resp) {
+        ESP_LOGE(TAG, "Failed to create response JSON object");
         free(hex_cipher);
         free(payload_str);
         cJSON_Delete(payload);
         cJSON_Delete(root);
         httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"response creation failed\"}");
-        return ESP_FAIL;
+        httpd_resp_sendstr(req, "{\"error\":\"memory allocation failed for response\"}");
+        return ESP_OK;
     }
+
+    cJSON_AddStringToObject(resp, "status", "ok");
+    cJSON_AddStringToObject(resp, "message", "Location data encrypted and sent via LoRa.");
     
-    cJSON_AddStringToObject(resp, "status", "encrypted_sent_printed");
-    cJSON_AddStringToObject(resp, "ephemeral_pub", hex_ephemeral);
-    cJSON_AddStringToObject(resp, "ciphertext", hex_cipher);
-    cJSON_AddStringToObject(resp, "signature", hex_sig);
-    
-    resp_str = cJSON_PrintUnformatted(resp);
+    resp_str = cJSON_Print(resp);
     if (!resp_str) {
-        cJSON_Delete(resp);
-        free(hex_cipher);
-        free(payload_str);
-        cJSON_Delete(payload);
-        cJSON_Delete(root);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "{\"error\":\"response serialization failed\"}");
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Failed to serialize response JSON");
+        ret = ESP_FAIL;
+    } else {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
+        ESP_LOGI(TAG, "Sent success response to client");
     }
-    
-    // Send response
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t result = httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
-    
+
     // Cleanup
-    free(resp_str);
-    cJSON_Delete(resp);
-    free(hex_cipher);
-    free(payload_str);
-    cJSON_Delete(payload);
-    cJSON_Delete(root);
-    
-    return result;
+    if (resp_str) free(resp_str);
+    if (resp) cJSON_Delete(resp);
+    if (hex_cipher) free(hex_cipher);
+    if (payload_str) free(payload_str);
+    if (payload) cJSON_Delete(payload);
+    if (root) cJSON_Delete(root);
+
+    return ret;
 }
 
 /* ---------- Start Webserver ---------- */
@@ -553,11 +607,13 @@ httpd_handle_t start_webserver(void)
             {.uri = "/api/status", .method = HTTP_GET, .handler = status_get_handler, .user_ctx = NULL},
             {.uri = "/api/public_key", .method = HTTP_GET, .handler = public_key_get_handler, .user_ctx = NULL},
             {.uri = "/api/store_peer", .method = HTTP_POST, .handler = store_peer_post_handler, .user_ctx = NULL},
+            {.uri = "/api/set_uid", .method = HTTP_POST, .handler = set_uid_post_handler, .user_ctx = NULL},
             {.uri = "/api/send_location", .method = HTTP_POST, .handler = send_location_post_handler, .user_ctx = NULL},
             {.uri = "/api/send_location", .method = HTTP_GET, .handler = send_location_get_handler, .user_ctx = NULL},
             {.uri = "/test.html", .method = HTTP_GET, .handler = test_page_handler, .user_ctx = NULL},
             // CORS OPTIONS handlers
             {.uri = "/api/store_peer", .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = NULL},
+            {.uri = "/api/set_uid", .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = NULL},
             {.uri = "/api/send_location", .method = HTTP_OPTIONS, .handler = options_handler, .user_ctx = NULL},
         };
 

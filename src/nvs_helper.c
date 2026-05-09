@@ -87,3 +87,26 @@ bool load_peer_publickey(const char *user_id, const char *receiver_id, uint8_t *
     nvs_close(handle);
     return (err == ESP_OK && rlen == out_len);
 }
+
+/* ---------- NVS helpers for Device UID ---------- */
+bool store_device_uid(const char *uid) {
+    nvs_handle_t handle;
+    if (nvs_open("device_cfg", NVS_READWRITE, &handle) != ESP_OK) return false;
+    if (nvs_set_str(handle, "uid", uid) != ESP_OK) {
+        nvs_close(handle);
+        return false;
+    }
+    nvs_commit(handle);
+    nvs_close(handle);
+    ESP_LOGI(TAG, "Stored device UID: %s", uid);
+    return true;
+}
+
+bool load_device_uid(char *uid_out, size_t max_len) {
+    nvs_handle_t handle;
+    if (nvs_open("device_cfg", NVS_READONLY, &handle) != ESP_OK) return false;
+    size_t len = max_len;
+    esp_err_t err = nvs_get_str(handle, "uid", uid_out, &len);
+    nvs_close(handle);
+    return (err == ESP_OK);
+}

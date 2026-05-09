@@ -2,10 +2,15 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "../include/lora_handler.h"
+#include "../include/crypto_v.h"
+#include "../include/ecc.h"
+#include "../include/nvs_helper.h"
 
 static const char *TAG = "LoRa";
 
@@ -20,6 +25,7 @@ static const char *TAG = "LoRa";
 #define REG_FIFO_ADDR_PTR       0x0D
 #define REG_FIFO_TX_BASE_ADDR   0x0E
 #define REG_FIFO_RX_BASE_ADDR   0x0F
+#define REG_FIFO_RX_CURRENT     0x10
 #define REG_IRQ_FLAGS           0x12
 #define REG_RX_NB_BYTES         0x13
 #define REG_PKT_RSSI_VALUE      0x1A
@@ -32,8 +38,11 @@ static const char *TAG = "LoRa";
 #define MODE_SLEEP              0x00
 #define MODE_STDBY              0x01
 #define MODE_TX                 0x03
+#define MODE_RX_CONTINUOUS      0x05
 
 #define IRQ_TX_DONE_MASK        0x08
+#define IRQ_RX_DONE_MASK        0x40
+#define IRQ_PAYLOAD_CRC_ERROR   0x20
 
 // ESP32-S2 Pin Mapping (shared SS pin with button)
 #define SS_PIN    GPIO_NUM_9
@@ -44,6 +53,7 @@ static const char *TAG = "LoRa";
 #define MOSI_PIN  GPIO_NUM_35
 
 static spi_device_handle_t spi;
+static SemaphoreHandle_t lora_mutex = NULL;
 
 // -------------------------------
 // SPI READ / WRITE LOW LEVEL
@@ -56,7 +66,9 @@ static uint8_t lora_read_reg(uint8_t reg) {
         .tx_buffer = tx,
         .rx_buffer = rx,
     };
+    if (lora_mutex) xSemaphoreTake(lora_mutex, portMAX_DELAY);
     spi_device_transmit(spi, &t);
+    if (lora_mutex) xSemaphoreGive(lora_mutex);
     return rx[1];
 }
 
@@ -66,7 +78,9 @@ static void lora_write_reg(uint8_t reg, uint8_t val) {
         .length = 16,
         .tx_buffer = tx,
     };
+    if (lora_mutex) xSemaphoreTake(lora_mutex, portMAX_DELAY);
     spi_device_transmit(spi, &t);
+    if (lora_mutex) xSemaphoreGive(lora_mutex);
 }
 
 // -------------------------------
@@ -105,6 +119,10 @@ static void lora_idle() {
     lora_write_reg(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
 }
 
+static void lora_receive() {
+    lora_write_reg(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_RX_CONTINUOUS);
+}
+
 static void lora_reset() {
     gpio_set_direction(RST_PIN, GPIO_MODE_OUTPUT);
     gpio_set_level(RST_PIN, 0);
@@ -140,10 +158,115 @@ void lora_send(uint8_t *data, uint8_t len) {
     // Clear IRQ flags
     lora_write_reg(REG_IRQ_FLAGS, 0xFF);
     
-    // Back to standby
-    lora_idle();
+    // Put back to continuous RX mode so the relay task keeps listening
+    lora_receive();
     
     ESP_LOGI(TAG, "✓ TX complete");
+}
+
+static int lora_receive_packet(uint8_t *buf, int max_len) {
+    uint8_t irq_flags = lora_read_reg(REG_IRQ_FLAGS);
+    
+    if ((irq_flags & IRQ_RX_DONE_MASK) == 0) {
+        return 0;
+    }
+    
+    ESP_LOGI(TAG, "⚡ RX_DONE detected! IRQ flags=0x%02X", irq_flags);
+    
+    if (irq_flags & IRQ_PAYLOAD_CRC_ERROR) {
+        ESP_LOGW(TAG, "CRC Error - clearing and restarting RX");
+        lora_write_reg(REG_IRQ_FLAGS, 0xFF);
+        lora_idle();
+        lora_write_reg(REG_FIFO_ADDR_PTR, 0);
+        lora_receive();
+        return 0;
+    }
+    
+    // Clear IRQ flags
+    lora_write_reg(REG_IRQ_FLAGS, 0xFF);
+    
+    int len = lora_read_reg(REG_RX_NB_BYTES);
+    if (len > max_len) len = max_len;
+    
+    uint8_t rx_addr = lora_read_reg(REG_FIFO_RX_CURRENT);
+    lora_write_reg(REG_FIFO_ADDR_PTR, rx_addr);
+    
+    for (int i = 0; i < len; i++) {
+        buf[i] = lora_read_reg(REG_FIFO);
+    }
+    
+    return len;
+}
+
+void lora_receive_task(void *pvParameters) {
+    ESP_LOGI(TAG, "Entering continuous receive mode for relaying...");
+
+    // Try to load device keys
+    uint8_t device_pub[ECC_PUBLIC_KEY_SIZE];
+    uint8_t device_priv[ECC_PRIVATE_KEY_SIZE];
+    bool keys_loaded = load_keys_from_nvs(device_pub, sizeof(device_pub), device_priv, sizeof(device_priv));
+    if (!keys_loaded) {
+        ESP_LOGW(TAG, "No ECC keys found in NVS! Will only act as a blind relay.");
+    }
+
+    lora_idle();
+    lora_write_reg(REG_IRQ_FLAGS, 0xFF);
+    lora_write_reg(REG_FIFO_RX_BASE_ADDR, 0);
+    lora_write_reg(REG_FIFO_ADDR_PTR, 0);
+    lora_receive();
+
+    uint8_t data[256];
+
+    while (1) {
+        int len = lora_receive_packet(data, sizeof(data));
+        
+        if (len >= 145 && len <= 256) {
+            int16_t rssi = lora_read_reg(REG_PKT_RSSI_VALUE) - 164;
+            uint8_t hop_count = data[0];
+            
+            // Extract the 12-byte UID from the package
+            char sender_uid[13] = {0};
+            memcpy(sender_uid, data + 1, 12);
+            
+            ESP_LOGI(TAG, "✓ RX [%d bytes, RSSI=%ddBm, Hops=%d, UID=%s]", len, rssi, hop_count, sender_uid);
+            
+            uint8_t *ephemeral_pub = data + 1 + 12;
+            size_t ciphertext_len = len - 1 - 12 - 64 - 64;
+            uint8_t *ciphertext = data + 1 + 12 + 64;
+            
+            bool decrypt_ok = false;
+            if (keys_loaded) {
+                uint8_t decrypted[128];
+                size_t dec_len = 0;
+                decrypt_ok = crypto_ecies_decrypt(
+                    device_priv,
+                    ephemeral_pub,
+                    ciphertext, ciphertext_len,
+                    decrypted, &dec_len
+                );
+            }
+            
+            if (!decrypt_ok) {
+                ESP_LOGI(TAG, "Packet not for us (decryption failed). Processing relay logic...");
+                #define MAX_HOPS 3
+                if (hop_count < MAX_HOPS) {
+                    ESP_LOGI(TAG, "Relaying packet. Incrementing hop_count to %d", hop_count + 1);
+                    data[0] = hop_count + 1;
+                    
+                    vTaskDelay(pdMS_TO_TICKS(100 + (esp_random() % 400)));
+                    lora_send(data, len); // lora_send takes care of returning to receive mode
+                } else {
+                    ESP_LOGW(TAG, "Max hops reached (%d). Dropping packet.", MAX_HOPS);
+                }
+            } else {
+                ESP_LOGI(TAG, "✓ Packet successfully decrypted. It was addressed to this node.");
+            }
+        } else if (len > 0) {
+            ESP_LOGW(TAG, "Unexpected packet size: %d bytes", len);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 // -------------------------------
@@ -174,6 +297,8 @@ static void lora_init_spi() {
 void lora_init(void) {
     ESP_LOGI(TAG, "Initializing LoRa module...");
 
+    lora_mutex = xSemaphoreCreateMutex();
+    
     lora_reset();
     lora_init_spi();
 
@@ -203,5 +328,8 @@ void lora_init(void) {
     lora_write_reg(REG_FIFO_RX_BASE_ADDR, 0);
     lora_idle();
 
-    ESP_LOGI(TAG, "LoRa initialized successfully, ready to transmit");
+    extern void lora_receive_task(void *pvParameters);
+    xTaskCreate(lora_receive_task, "lora_receive", 8192, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "LoRa initialized successfully, ready to transmit and receive/relay");
 }
