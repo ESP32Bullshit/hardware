@@ -14,6 +14,28 @@
 
 static const char *TAG = "LoRa";
 
+#define HISTORY_SIZE 30
+
+// History buffer to track recent packet signatures
+static uint8_t packet_history[HISTORY_SIZE][ECC_SIGNATURE_SIZE];
+static int history_index = 0;
+
+static bool is_duplicate_packet(const uint8_t *signature) {
+    for (int i = 0; i < HISTORY_SIZE; i++) {
+        // If we find an exact match of the 64-byte signature, it's a duplicate
+        if (memcmp(packet_history[i], signature, ECC_SIGNATURE_SIZE) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void add_to_history(const uint8_t *signature) {
+    // Add signature to rolling buffer
+    memcpy(packet_history[history_index], signature, ECC_SIGNATURE_SIZE);
+    history_index = (history_index + 1) % HISTORY_SIZE;
+}
+
 // SX1278 Registers
 #define REG_FIFO                0x00
 #define REG_OP_MODE             0x01
@@ -134,6 +156,13 @@ static void lora_reset() {
 void lora_send(uint8_t *data, uint8_t len) {
     ESP_LOGI(TAG, "Sending %d bytes...", len);
 
+    // If it's a LoRa packet containing a signature at the end (minimum size check)
+    if (len >= 145 && len <= 256) {
+        uint8_t *outgoing_signature = data + len - ECC_SIGNATURE_SIZE;
+        // Don't check for duplicate, just add to history so we don't relay our own sent packets if someone echoes them back soon
+        add_to_history(outgoing_signature);
+    }
+
     lora_idle();
     
     // Reset FIFO address pointer
@@ -223,6 +252,18 @@ void lora_receive_task(void *pvParameters) {
         if (len >= 145 && len <= 256) {
             int16_t rssi = lora_read_reg(REG_PKT_RSSI_VALUE) - 164;
             uint8_t hop_count = data[0];
+            
+            // Extract signature which is always the last 64 bytes of the payload
+            uint8_t *incoming_signature = data + len - ECC_SIGNATURE_SIZE;
+            
+            // Check against rolling buffer of the last 30 packets using just the signature
+            if (is_duplicate_packet(incoming_signature)) {
+                ESP_LOGI(TAG, "Duplicate packet detected. Ignoring.");
+                continue;
+            }
+            
+            // Save packet signature to history to prevent future duplicates
+            add_to_history(incoming_signature);
             
             // Extract the 12-byte UID from the package
             char sender_uid[13] = {0};
